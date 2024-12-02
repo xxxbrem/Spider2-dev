@@ -15,7 +15,8 @@ def get_csv_from_dic(folder_names, output_dic):
             path_csv = os.path.join(directory, name)
             shutil.copy(path_csv, os.path.join(output_dic, "result.csv"))
 
-directory = "output/o1-preview-test1"
+# directory = "output/o1-preview-test1"
+directory = "output/4o-test1"
 # output_dic = "o1_results_for_lite_test"
 folder_names = [name for name in os.listdir(directory) if os.path.isdir(os.path.join(directory, name))]
 save_to_jsonl(folder_names, directory+'/results_metadata.jsonl')

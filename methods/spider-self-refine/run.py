@@ -39,14 +39,14 @@ def search_file(directory, target_file):
     return result
 
 class GPTChat:
-    def __init__(self) -> None:
+    def __init__(self, model="gpt-4o") -> None:
         self.client = OpenAI(
             api_key=os.environ.get("OPENAI_API_KEY"),  # This is the default and can be omitted
         )
         self.messages = []
-        self.model = "o1-preview"
+        self.model = model
 
-    def get_gpt_response(self, prompt):
+    def get_gpt_response_sql(self, prompt):
         self.messages.append({"role": "user", "content": prompt})
         try:
             response = self.client.chat.completions.create(
@@ -64,7 +64,7 @@ class GPTChat:
             sql_query = extract_all_sql_blocks(main_content)
         self.messages.append({"role": "assistant", "content": main_content})
         return sql_query
-    def get_gpt_response_pre(self, prompt):
+    def get_gpt_response_txt(self, prompt):
         self.messages.append({"role": "user", "content": prompt})
         try:
             response = self.client.chat.completions.create(
@@ -83,10 +83,10 @@ class GPTChat:
         self.messages.append({"role": "assistant", "content": main_content})
         return main_content
 
-    def get_messages(self):
-        return self.messages
+    def get_message_len(self):
+        return sum([len(i['content']) for i in self.messages])
 
-def excute_sql(sql_query, save_path, is_save=True):
+def excute_sql(sql_query, save_path=None):
     # Load Snowflake credentials
     snowflake_credential = json.load(open("./snowflake_credential.json"))
 
@@ -112,12 +112,13 @@ def excute_sql(sql_query, save_path, is_save=True):
                 return "No data found for the specified query."
             else:
                 # Save or print the results based on the is_save flag
-                if {is_save}:
+                if save_path:
                     df.to_csv(f"{save_path}", index=False)
                     print(f"Results saved to {save_path}")
+                    return 0
                 else:
-                    print(df)
-                return 0
+                    # print(df)
+                    return df.to_csv()
         except Exception as e:
             print("Error occurred while fetching data: ", e)
             return e
@@ -138,13 +139,25 @@ def main(args):
     target_json = "result.json"
     name = "result_s"
 
+    # read file
+    # json_path = search_file(search_directory, target_json)[0]
+
+    json_path = os.path.join(args.test_path, "task/spider2-snow.jsonl")
+    task_dict = {}
+    with open(json_path) as f:
+        for line in f:
+            line_js = json.loads(line)
+            task_dict[line_js['instance_id']] = line_js['instruction']
+
     dictionaries = [entry for entry in os.listdir(args.test_path) if os.path.isdir(os.path.join(args.test_path, entry))]
+    dictionaries.remove('task')
     for sql_data in tqdm(dictionaries):
         save_path = name + ".csv"
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
 
         print(sql_data)
+        task = task_dict[sql_data]
         search_directory = args.test_path +  '/' + sql_data
 
         # if self.csv exists, pass
@@ -154,23 +167,18 @@ def main(args):
         # if "result_s.csv" in os.listdir(search_directory):
         #     continue
         
-        # clear *self* file
+        # overwrite
         self_files = glob.glob(os.path.join(search_directory, f'*{name}*'))
         for self_file in self_files:
             os.remove(self_file)
 
+        # log
         log_file_path = os.path.join(search_directory, "log.log")
         file_handler = logging.FileHandler(log_file_path, mode='w')
         file_handler.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-
-        json_path = search_file(search_directory, target_json)[0]
-
-        with open(json_path) as f:
-            data = json.load(f)
-        task = data['Task']
 
         table_info = ''
         for txt in table_info_txt:
@@ -179,18 +187,47 @@ def main(args):
                 with open(path) as f:
                     table_info += f.read()
 
-        prompt = "Task: " + task + "\n" + table_info
-        chat_session = GPTChat()
-        ans = prompt + "Consider what tables and columns are related to the task? Answer like: {column name}: {potential usage}, no sql query.\n"
-        response = chat_session.get_gpt_response_pre(ans)
-        if response == "Exceeded":
-            print(response)
-            continue
+        # preparation
+        response_pre = "Exceeded"
+        LIMIT = 10
+        while LIMIT > 0:
+            prompt = table_info + "\n" + "Task: " + task + "\n"
+            chat_session = GPTChat()
+            ans_pre = prompt + f"Consider which tables and columns are relevant to the task? Answer like: `column name`: `potential usage`. Then write sql queries `SELECT DISTINCT \"COLUMN_NAME\" FROM PROJECT.DATABASE.TABLE LIMIT {LIMIT}` to have an understanding of values in these columns. DO NOT directly answer the task and ensure all column names are enclosed in double quotations!\n"
+            logger.info(ans_pre)
+            response_pre = chat_session.get_gpt_response_sql(ans_pre)
+            logger.info(chat_session.messages[-1]['content'])
+            if response_pre == "Exceeded":
+                LIMIT -= 3
+                # print(f"{response_pre}, adjust LIMIT: {LIMIT}")
+                print(f"{response_pre}, retry")
+                continue
 
+            pre_info = f"Possible values for important columns:\n"
+            for i in range(len(response_pre)):
+                e = excute_sql(response_pre[i])
+                if isinstance(e, str):
+                    pre_info += e
+                else:
+                    if "0A000" in e.msg:
+                        queries = [query.strip() for query in response_pre[i].strip().split(';') if query.strip()]
+                        for q in queries:
+                            e = excute_sql(q)
+                            if isinstance(e, str):
+                                pre_info += e
+
+            if len(pre_info) < 1e5:
+                break
+            print("Retry preparation.")
+            LIMIT -= 3
+        print(f"len(pre_info): {len(pre_info)}, chat_session.get_message_len(): {chat_session.get_message_len()}")
+
+        # answer
         itercount = 0
         inconsistency = True
-        e = prompt + response
-        e += '\nPlease answer in snowflake dialect.\n \ Usage example: SELECT S."Column_Name" FROM {Project Name}.{Database Name}.{Table_name} (Remember to use double quotation marks for column names)\n'
+        e = pre_info
+        
+        e += "Task: " + task + "\n"+'\nPlease answer in snowflake dialect.\nUsage example: SELECT S."Column_Name" FROM {Project Name}.{Database Name}.{Table_name} (ensure all column names are enclosed in double quotations)\n'
         error_rec = []
         while inconsistency and itercount < args.max_iter:
             logger.info(e)
@@ -205,7 +242,7 @@ def main(args):
             if hasattr(e, 'msg'):
                 e = "The error information is:\n" + e.msg + "\nPlease correct it and output only 1 complete sql query."
                 inconsistency = True
-            response = chat_session.get_gpt_response(e)
+            response = chat_session.get_gpt_response_sql(e)
             if response == "Exceeded":
                 print(response)
                 break
