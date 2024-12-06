@@ -7,6 +7,7 @@ from tqdm import tqdm
 import logging
 import argparse
 import glob
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def extract_all_sql_blocks(main_content):
     sql_blocks = []
@@ -46,7 +47,7 @@ class GPTChat:
         self.messages = []
         self.model = model
 
-    def get_gpt_response_sql(self, prompt):
+    def get_model_response_sql(self, prompt):
         self.messages.append({"role": "user", "content": prompt})
         try:
             response = self.client.chat.completions.create(
@@ -64,7 +65,7 @@ class GPTChat:
             sql_query = extract_all_sql_blocks(main_content)
         self.messages.append({"role": "assistant", "content": main_content})
         return sql_query
-    def get_gpt_response_txt(self, prompt):
+    def get_model_response_txt(self, prompt):
         self.messages.append({"role": "user", "content": prompt})
         try:
             response = self.client.chat.completions.create(
@@ -85,6 +86,41 @@ class GPTChat:
 
     def get_message_len(self):
         return sum([len(i['content']) for i in self.messages])
+
+class modelChat():
+    def __init__(self, model, tokenizer) -> None:
+        self.model = model
+        self.tokenizer = tokenizer
+        self.messages = []
+
+    def get_model_response_sql(self, prompt):
+        self.messages.append({"role": "user", "content": prompt})
+        text = self.tokenizer.apply_chat_template(
+            self.messages,
+            tokenize=False,
+            add_generation_prompt=True
+        )
+        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+
+        generated_ids = self.model.generate(
+            **model_inputs,
+            max_new_tokens=512
+        )
+        generated_ids = [
+            output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+        ]
+
+        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        sql_query = extract_all_sql_blocks(response)
+        self.messages.append({"role": "assistant", "content": response})
+        return sql_query
+
+    def get_message_len(self):
+        return sum([len(i['content']) for i in self.messages])
+
+    def init_messages(self):
+        self.messages = []
+
 
 def excute_sql(sql_query, save_path=None):
     # Load Snowflake credentials
@@ -151,7 +187,22 @@ def main(args):
 
     dictionaries = [entry for entry in os.listdir(args.test_path) if os.path.isdir(os.path.join(args.test_path, entry))]
     dictionaries.remove('task')
+
+    if "gpt" in args.model:
+        chat_session = GPTChat(args.model)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype="auto",
+            device_map="auto"
+        )
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        chat_session = modelChat(model, tokenizer)
+
+
     for sql_data in tqdm(dictionaries):
+        chat_session.init_messages()
+
         save_path = name + ".csv"
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
@@ -188,14 +239,15 @@ def main(args):
                     table_info += f.read()
 
         # preparation
+
         response_pre = "Exceeded"
         LIMIT = 10
         while LIMIT > 0:
             prompt = table_info + "\n" + "Task: " + task + "\n"
-            chat_session = GPTChat()
+            
             ans_pre = prompt + f"Consider which tables and columns are relevant to the task? Answer like: `column name`: `potential usage`. Then write sql queries `SELECT DISTINCT \"COLUMN_NAME\" FROM PROJECT.DATABASE.TABLE LIMIT {LIMIT}` to have an understanding of values in these columns. DO NOT directly answer the task and ensure all column names are enclosed in double quotations!\n"
             logger.info(ans_pre)
-            response_pre = chat_session.get_gpt_response_sql(ans_pre)
+            response_pre = chat_session.get_model_response_sql(ans_pre)
             logger.info(chat_session.messages[-1]['content'])
             if response_pre == "Exceeded":
                 LIMIT -= 3
@@ -242,7 +294,7 @@ def main(args):
             if hasattr(e, 'msg'):
                 e = "The error information is:\n" + e.msg + "\nPlease correct it and output only 1 complete sql query."
                 inconsistency = True
-            response = chat_session.get_gpt_response_sql(e)
+            response = chat_session.get_model_response_sql(e)
             if response == "Exceeded":
                 print(response)
                 break
@@ -267,6 +319,7 @@ if __name__ == '__main__':
     # args.test_path = "output/test"
     # args.test_path = "output/o1-preview-test1"
     parser.add_argument('--test_path', type=str, default="output/test")
+    parser.add_argument('--model', type=str, default="models/QwQ-32B-Preview")
     parser.add_argument('--overwrite_results', action="store_true")
     parser.add_argument('--max_iter', type=int, default=10)
     args = parser.parse_args()

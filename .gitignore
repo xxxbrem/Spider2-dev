@@ -128,6 +128,7 @@ spider-agent/bigquery_credential.json
 spider2-lite/bigquery_credential.json
 # spider2-lite/snowflake_credential.json
 spider2/bigquery_credential.json
+methods/spider-self-refine/snowflake_credential.json
 
 !methods/spider-agent-snow/snowflake_credential.json
 !spider2/evaluation_suite/snowflake_credential.json
@@ -143,3 +144,7 @@ spider2-lite/resource/databases/spider2-localdb
 credentials/
 **/credentials/
 
+methods/spider-self-refine/examples/*
+methods/spider-self-refine/models/*
+methods/spider-self-refine/output/*
+methods/spider-self-refine/task/*
