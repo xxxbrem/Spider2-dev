@@ -86,6 +86,9 @@ class GPTChat:
 
     def get_message_len(self):
         return sum([len(i['content']) for i in self.messages])
+    
+    def init_messages(self):
+        self.messages = []
 
 class modelChat():
     def __init__(self, model, tokenizer) -> None:
@@ -178,7 +181,7 @@ def main(args):
     # read file
     # json_path = search_file(search_directory, target_json)[0]
 
-    json_path = os.path.join(args.test_path, "task/spider2-snow.jsonl")
+    json_path = os.path.join(args.test_path, "../task/spider2-snow.jsonl")
     task_dict = {}
     with open(json_path) as f:
         for line in f:
@@ -186,9 +189,8 @@ def main(args):
             task_dict[line_js['instance_id']] = line_js['instruction']
 
     dictionaries = [entry for entry in os.listdir(args.test_path) if os.path.isdir(os.path.join(args.test_path, entry))]
-    dictionaries.remove('task')
 
-    if "gpt" in args.model:
+    if "gpt" in args.model or "o1-preview" in args.model:
         chat_session = GPTChat(args.model)
     else:
         model = AutoModelForCausalLM.from_pretrained(
@@ -243,6 +245,7 @@ def main(args):
         response_pre = "Exceeded"
         LIMIT = 10
         while LIMIT > 0:
+            chat_session.init_messages()
             prompt = table_info + "\n" + "Task: " + task + "\n"
             
             ans_pre = prompt + f"Consider which tables and columns are relevant to the task? Answer like: `column name`: `potential usage`. Then write sql queries `SELECT DISTINCT \"COLUMN_NAME\" FROM PROJECT.DATABASE.TABLE LIMIT {LIMIT}` to have an understanding of values in these columns. DO NOT directly answer the task and ensure all column names are enclosed in double quotations!\n"
@@ -250,7 +253,7 @@ def main(args):
             response_pre = chat_session.get_model_response_sql(ans_pre)
             logger.info(chat_session.messages[-1]['content'])
             if response_pre == "Exceeded":
-                LIMIT -= 3
+                LIMIT -= 9
                 # print(f"{response_pre}, adjust LIMIT: {LIMIT}")
                 print(f"{response_pre}, retry")
                 continue
