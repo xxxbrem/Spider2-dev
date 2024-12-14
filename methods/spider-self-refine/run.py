@@ -9,22 +9,22 @@ import argparse
 import glob
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-def extract_all_sql_blocks(main_content):
+def extract_all_blocks(main_content, code_format):
     sql_blocks = []
     start = 0
     
     while True:
 
-        sql_query_start = main_content.find("```sql", start)
+        sql_query_start = main_content.find(f"```{code_format}", start)
         if sql_query_start == -1:
             break
         
 
-        sql_query_end = main_content.find("```", sql_query_start + len("```sql"))
+        sql_query_end = main_content.find("```", sql_query_start + len(f"```{code_format}"))
         if sql_query_end == -1:
             break 
 
-        sql_block = main_content[sql_query_start + len("```sql"):sql_query_end].strip()
+        sql_block = main_content[sql_query_start + len(f"```{code_format}"):sql_query_end].strip()
         sql_blocks.append(sql_block)
 
         start = sql_query_end + len("```")
@@ -47,7 +47,7 @@ class GPTChat:
         self.messages = []
         self.model = model
 
-    def get_model_response_sql(self, prompt):
+    def get_model_response(self, prompt, code_format):
         self.messages.append({"role": "user", "content": prompt})
         try:
             response = self.client.chat.completions.create(
@@ -62,7 +62,7 @@ class GPTChat:
             main_content = choices[0].message.content
             # print("Main Content:\n", main_content)
             
-            sql_query = extract_all_sql_blocks(main_content)
+            sql_query = extract_all_blocks(main_content, code_format)
         self.messages.append({"role": "assistant", "content": main_content})
         return sql_query
     def get_model_response_txt(self, prompt):
@@ -96,7 +96,7 @@ class modelChat():
         self.tokenizer = tokenizer
         self.messages = []
 
-    def get_model_response_sql(self, prompt):
+    def get_model_response(self, prompt, code_format):
         self.messages.append({"role": "user", "content": prompt})
         text = self.tokenizer.apply_chat_template(
             self.messages,
@@ -114,7 +114,7 @@ class modelChat():
         ]
 
         response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        sql_query = extract_all_sql_blocks(response)
+        sql_query = extract_all_blocks(response)
         self.messages.append({"role": "assistant", "content": response})
         return sql_query
 
@@ -190,8 +190,10 @@ def main(args):
 
     dictionaries = [entry for entry in os.listdir(args.test_path) if os.path.isdir(os.path.join(args.test_path, entry))]
 
-    if "gpt" in args.model or "o1-preview" in args.model:
+    if "gpt" in args.model or "o1" in args.model:
         chat_session = GPTChat(args.model)
+        # chat_session4o = GPTChat("gpt-4o")
+        chat_session4o = GPTChat("o1-mini")
     else:
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
@@ -204,6 +206,7 @@ def main(args):
 
     for sql_data in tqdm(dictionaries):
         chat_session.init_messages()
+        chat_session4o.init_messages()
 
         save_path = name + ".csv"
         for handler in logger.handlers[:]:
@@ -240,17 +243,19 @@ def main(args):
                 with open(path) as f:
                     table_info += f.read()
 
-        # preparation
+        # format
+        format_prompt = "\nThis is a sql task. Please output a possible simplest answer format in ```plaintext``` format. Fill the table according to the task description (and explain why) rather than database. Be careful of limiting just 1 row when faced with superlative. For coordinates cases, use ST_POINT() function. Don't output any sql query."
+        response_csv = chat_session4o.get_model_response_txt("Task: " + task + format_prompt)
 
-        response_pre = "Exceeded"
+        # preparation
         LIMIT = 10
         while LIMIT > 0:
-            chat_session.init_messages()
+            
             prompt = table_info + "\n" + "Task: " + task + "\n"
             
-            ans_pre = prompt + f"Consider which tables and columns are relevant to the task? Answer like: `column name`: `potential usage`. Then write sql queries `SELECT DISTINCT \"COLUMN_NAME\" FROM PROJECT.DATABASE.TABLE LIMIT {LIMIT}` to have an understanding of values in these columns. DO NOT directly answer the task and ensure all column names are enclosed in double quotations!\n"
+            ans_pre = prompt + f"Consider which tables and columns are relevant to the task? Answer like: `column name`: `potential usage`. And also conditions that may be used. Then write sql queries `SELECT DISTINCT \"COLUMN_NAME\" FROM PROJECT.DATABASE.TABLE LIMIT {LIMIT}` to have an understanding of values in these columns. For columns in json format: \"key\".value:\"value\". DO NOT directly answer the task and ensure all column names are enclosed in double quotations!\n"
             logger.info(ans_pre)
-            response_pre = chat_session.get_model_response_sql(ans_pre)
+            response_pre = chat_session.get_model_response(ans_pre, "sql")
             logger.info(chat_session.messages[-1]['content'])
             if response_pre == "Exceeded":
                 LIMIT -= 9
@@ -275,29 +280,35 @@ def main(args):
                 break
             print("Retry preparation.")
             LIMIT -= 3
+            chat_session.init_messages()
         print(f"len(pre_info): {len(pre_info)}, chat_session.get_message_len(): {chat_session.get_message_len()}")
+
+        
 
         # answer
         itercount = 0
-        inconsistency = True
         e = pre_info
-        
+        results_post = None
         e += "Task: " + task + "\n"+'\nPlease answer in snowflake dialect.\nUsage example: SELECT S."Column_Name" FROM {Project Name}.{Database Name}.{Table_name} (ensure all column names are enclosed in double quotations)\n'
+        e += f"You may combine 2 column into 1 column to follow the column name in answer format like: {response_csv}.\n"
         error_rec = []
-        while inconsistency and itercount < args.max_iter:
+        while itercount < args.max_iter:
             logger.info(e)
             if e == 0:
-                inconsistency = False
-                e = "Please check the answer again and give the final SQL query. It doesn't mean you are wrong, just check again. Answer: \n"
+                e = f"Please check the answer again and give the final SQL query. It doesn't mean you are wrong, just check again. The answer format may be like {response_csv}. Don't output extra rows. Your snswer: \n"
                 with open(search_directory + "/" + save_path) as f:
                     csv_data = f.readlines()
-                    e += ''.join(csv_data)
+                e += ''.join(csv_data)
+                if not results_post:
+                    results_post = ''.join(csv_data)
+                else:
+                    if results_post == ''.join(csv_data):
+                        break
 
                 save_path = str(itercount) + save_path
             if hasattr(e, 'msg'):
                 e = "The error information is:\n" + e.msg + "\nPlease correct it and output only 1 complete sql query."
-                inconsistency = True
-            response = chat_session.get_model_response_sql(e)
+            response = chat_session.get_model_response(e, "sql")
             if response == "Exceeded":
                 print(response)
                 break
@@ -306,8 +317,6 @@ def main(args):
                 response_len = [len(i) for i in response]
                 response_index = response_len.index(max(response_len))
                 e = excute_sql(response[response_index], search_directory + "/" + save_path)
-            if inconsistency == False and e != 0:
-                inconsistency = True
             itercount += 1
             error_rec.append(e)
             if len(error_rec) > 3:
